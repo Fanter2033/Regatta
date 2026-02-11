@@ -42,9 +42,8 @@ def train():
         return jsonify({"error": "Training already in progress"}), 409
 
     data = request.json
-    max_steps   = int(data.get("max_steps", 250))
     field_size  = int(data.get("field_size", 400))
-    variable_wind = bool(data.get("variable_wind", True))
+    max_steps   = int(data.get("max_steps", 250))
     total_timesteps = int(data.get("total_timesteps", 500_000))
 
     training_state.update({
@@ -56,15 +55,14 @@ def train():
         "error": None,
         "cancel_requested": False,
         "params": {
-            "max_steps": max_steps,
             "field_size": field_size,
-            "variable_wind": variable_wind,
+            "max_steps": max_steps,
         }
     })
 
     thread = threading.Thread(
         target=_train_worker,
-        args=(max_steps, field_size, variable_wind, total_timesteps),
+        args=(field_size, max_steps, total_timesteps),
         daemon=True
     )
     thread.start()
@@ -98,9 +96,8 @@ def simulate():
         return jsonify({"error": "No trained model found. Train first."}), 400
 
     params = training_state["params"]
-    max_steps     = params.get("max_steps", 250)
     field_size    = params.get("field_size", 400)
-    variable_wind = params.get("variable_wind", True)
+    max_steps     = params.get("max_steps", 250)
 
     from stable_baselines3 import PPO
     model = PPO.load(model_path)
@@ -108,7 +105,6 @@ def simulate():
     env = MultiAgentSailingZoo(
         field_size=field_size,
         max_steps=max_steps,
-        variable_wind=variable_wind,
         render_mode="rgb_array"
     )
     observations, infos = env.reset()
@@ -117,7 +113,7 @@ def simulate():
     step = 0
     last_infos = infos
 
-    while env.agents and step < max_steps:
+    while env.agents and step < env.max_steps:
         actions = {}
         for agent_id in env.agents:
             obs = observations[agent_id]
@@ -154,7 +150,7 @@ def simulate():
         outcome = f"Target reached by {winner}"
     elif collision:
         outcome = "Collision"
-    elif step >= max_steps:
+    elif step >= env.max_steps:
         outcome = "Timeout"
     else:
         outcome = "Out of bounds"
@@ -239,14 +235,12 @@ def _test_worker(model_path, num_episodes, params):
 
         model = PPO.load(model_path)
 
-        max_steps     = params.get("max_steps", 250)
         field_size    = params.get("field_size", 400)
-        variable_wind = params.get("variable_wind", True)
+        max_steps     = params.get("max_steps", 250)
 
         env = MultiAgentSailingZoo(
             field_size=field_size,
             max_steps=max_steps,
-            variable_wind=variable_wind,
         )
 
         counts = {
@@ -379,7 +373,7 @@ def serve_static(filename):
 
 # ── Training worker ───────────────────────────────────────────────────────────
 
-def _train_worker(max_steps, field_size, variable_wind, total_timesteps):
+def _train_worker(field_size, max_steps, total_timesteps):
     try:
         import supersuit as ss
         from stable_baselines3 import PPO
@@ -406,7 +400,6 @@ def _train_worker(max_steps, field_size, variable_wind, total_timesteps):
         env = MultiAgentSailingZoo(
             field_size=field_size,
             max_steps=max_steps,
-            variable_wind=variable_wind
         )
         env = ss.black_death_v3(env)
         env = ss.pettingzoo_env_to_vec_env_v1(env)

@@ -381,7 +381,7 @@ class MultiAgentSailingZoo(ParallelEnv):
         if not self.agents: # Se tutti hanno finito
             reason = "Target Raggiunto" if self.winner else ("Collisione" if collision else "Timeout/Out of Bounds")
             print(f"\n{'='*40}")
-            print(f"🏁 FINE REGATA - Step: {self.step_count} | Causa: {reason}")
+            print(f"FINE REGATA - Step: {self.step_count} | Causa: {reason}")
             for a in self.possible_agents:
                 status = "🏆" if self.winner == a else "❌"
                 vmg = infos[a]['avg_vmg']

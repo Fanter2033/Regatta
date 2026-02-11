@@ -11,40 +11,41 @@ from pettingzoo import ParallelEnv
 class MultiAgentSailingZoo(ParallelEnv):
     metadata = {"render_modes": ["rgb_array", "human"], "name": "sailing_v1"}
 
-    def __init__(self, field_size=400, max_steps=250, variable_wind=True, render_mode=None):
+    def __init__(self, field_size=400, max_steps=250, render_mode=None):
         super().__init__()
 
         self.field_size = field_size
         self.render_mode = render_mode
-        self.variable_wind = variable_wind
 
-        # Parametri Fisici
+        # Physical Parameters
         self.max_speed = 15.0
         self.target_radius = 20.0
         self.boat_radius = 5.0
         self.dt = 1.0
         self.max_steps = max_steps
 
-        # Agenti
+        # Agents
         self.possible_agents = ["boat_0", "boat_1"]
         self.agents = self.possible_agents[:]
 
-        # Spazi
+        # RL spaces
         self._obs_space = spaces.Box(low=-1.0, high=1.0, shape=(14,), dtype=np.float32)
-        self._act_space = spaces.Discrete(3)
+        self._act_space = spaces.Discrete(3) # 0: SX, 1: Dritto, 2: DX
         self.observation_spaces = {agent: self._obs_space for agent in self.possible_agents}
         self.action_spaces = {agent: self._act_space for agent in self.possible_agents}
 
-        # Variabili Stato
+        # States variables
         self.boat_states = {}
         self.target = []
         self.wind_direction = None
         self.wind_speed = None
         self.step_count = 0
         self.trajectories = {a: [] for a in self.agents}
+        self.previous_distances = {a: 0.0 for a in self.agents}
+        self.best_distances = {a: 0.0 for a in self.agents}
         self.winner = None
 
-        # Accumulatori per le statistiche
+        # Stats variables
         self.stat_cumulative_vmg = {}
         self.stat_cumulative_polar = {}
         self.stat_total_dist = {}
@@ -62,6 +63,7 @@ class MultiAgentSailingZoo(ParallelEnv):
 
     def reset(self, seed=None, options=None):
         self.agents = self.possible_agents[:]
+        # Reset global variables used in step
         self.step_count = 0
         self.winner = None
 
@@ -70,61 +72,69 @@ class MultiAgentSailingZoo(ParallelEnv):
         elif self.np_random is None:
             self.np_random = np.random.RandomState()
 
-        # Generazione target (scaled with field size)
+        # Target Position
         self.target = np.array([
             self.np_random.uniform(self.field_size - 200, self.field_size - 200),
             self.np_random.uniform(self.field_size - 50, self.field_size - 50)
         ])
 
-        # Vento
-        self.wind_direction = np.pi / 2
+        # Wind
+        self.wind_direction = self.np_random.uniform(0, np.pi)
         self.wind_speed = self.np_random.uniform(10, 18)
         self.wind_change_steps = 25
 
-        # Barche
+        # Boat reset
         start_x = self.np_random.uniform(100, 300)
         start_y = self.np_random.uniform(50, 50)
-
         self.boat_states = {}
         self.trajectories = {a: [] for a in self.agents}
         self.previous_distances = {}
         self.best_distances = {}
+        heading = self.np_random.uniform(0, 2*np.pi)
 
-        heading = self.np_random.uniform(0, 2 * np.pi)
-
+        # Random offset to create fairness in training
+        spawn_offsets = [0, 20]
+        self.np_random.shuffle(spawn_offsets)
         for i, agent in enumerate(self.agents):
+            offset = spawn_offsets[i]
             self.boat_states[agent] = {
-                'x': start_x + (i * 20),
+                'x': start_x + offset,
                 'y': start_y,
                 'speed': 0.0,
                 'heading': heading,
                 'finished': False,
                 'max_speed_hit': 0.0,
-                'is_inside': False
+                'is_inside': False,
+                'is_inside_curr': False,
+                'is_near_target': False
             }
-            self.trajectories[agent].append(
-                np.array([self.boat_states[agent]['x'], self.boat_states[agent]['y']]))
+            self.trajectories[agent].append(np.array([self.boat_states[agent]['x'], self.boat_states[agent]['y']]))
 
+            # Initial distance to target
             pos = np.array([self.boat_states[agent]['x'], self.boat_states[agent]['y']])
             dist = np.linalg.norm(pos - self.target)
 
             self.stat_initial_dist[agent] = dist
             self.best_distances[agent] = dist
 
+            # Reset stats variables
             self.stat_total_dist[agent] = 0.0
             self.stat_cumulative_vmg[agent] = 0.0
             self.stat_cumulative_polar[agent] = 0.0
 
         target_x = self.target[0]
 
+        # Compute distance of boats to the axis x of the target
         x_distances = {}
         for agent in self.agents:
             boat_x = self.boat_states[agent]['x']
             dist_x = abs(target_x - boat_x)
             x_distances[agent] = dist_x
 
+        # Find minimum distance between boats
         min_dist_x = min(x_distances.values())
 
+        # Assign 'is_inside' to the boats that are closest (for stats)
         for agent in self.agents:
             if x_distances[agent] == min_dist_x:
                 self.boat_states[agent]['is_inside'] = True
@@ -140,6 +150,7 @@ class MultiAgentSailingZoo(ParallelEnv):
         if not self.agents:
             return {}, {}, {}, {}, {}
 
+        # Instantiate dictionaries
         rewards = {a: 0.0 for a in self.possible_agents}
         terminations = {a: False for a in self.possible_agents}
         truncations = {a: False for a in self.possible_agents}
@@ -147,184 +158,266 @@ class MultiAgentSailingZoo(ParallelEnv):
 
         self.step_count += 1
 
-        for agent in self.agents:
-            if agent not in actions:
-                continue
+
+        # Create random order of actions to create fairness in training
+        agents_order = self.agents[:]
+        self.np_random.shuffle(agents_order)
+
+        # Physics and action appliation
+        for agent in agents_order:
+            if agent not in actions: continue # If the agent is dead/finished, skips
+
             action = actions[agent]
             state = self.boat_states[agent]
-            if state['finished']:
-                continue
 
+            if state['finished']: continue
+
+            # Apply rotation or keep sailing forward
             if action == 0:
-                state['heading'] -= np.radians(15)
+              state['heading'] -= np.radians(15)
             elif action == 2:
-                state['heading'] += np.radians(15)
+              state['heading'] += np.radians(15)
             state['heading'] = state['heading'] % (2 * np.pi)
 
+            # Velocity with polar diagram
             apparent_wind = self.wind_direction - state['heading']
             current_wind_speed = self.wind_speed
 
             theoretical_max_speed = self._get_polar_speed(apparent_wind, self.wind_speed)
             self.stat_cumulative_polar[agent] += theoretical_max_speed
 
-            opponents = [opp for opp in self.possible_agents if
-                         opp != agent and not self.boat_states[opp]['finished']]
+            # Identify opponents
+            opponents = [opponent for opponent in self.possible_agents if opponent != agent and not self.boat_states[opponent]['finished']]
 
+            # Compute shadow box
             for opp in opponents:
                 opp_state = self.boat_states[opp]
+
+                # Distance between boats
                 dx = state['x'] - opp_state['x']
                 dy = state['y'] - opp_state['y']
-                dist = np.hypot(dx, dy)
+                dist = np.hypot(dx,dy)
 
+                # Angle of wind in relation to the vector of the boats
                 wind_vec = -np.array([np.cos(self.wind_direction), np.sin(self.wind_direction)])
                 pos_vec = np.array([dx, dy])
+
+                # Projection: positive (im in shadow), negative (not in shadow)
                 proj = np.dot(wind_vec, pos_vec)
 
+                # Check if boat is in shadow and close to being affected by it
                 if proj > 0 and dist < (self.boat_radius * 10):
                     cos_angle = np.clip(proj / (dist + 1e-6), -1.0, 1.0)
                     angle_diff = np.arccos(cos_angle)
                     if angle_diff < np.radians(20):
+                        # Decrease speed while in shadow box
                         current_wind_speed = current_wind_speed * 0.6
-                        rewards[agent] -= 2
 
+            # Real speed
             state['speed'] = self._get_polar_speed(apparent_wind, current_wind_speed)
 
             if state['speed'] > state['max_speed_hit']:
                 state['max_speed_hit'] = state['speed']
 
+            # Boat Movement
             displacement = state['speed'] * 0.514 * self.dt
             state['x'] += displacement * np.cos(state['heading'])
             state['y'] += displacement * np.sin(state['heading'])
 
             self.trajectories[agent].append(np.array([state['x'], state['y']]))
+
+
             self.stat_total_dist[agent] += displacement
 
-        # Collisioni
+        # Collision computing (only for 2 boats so change if using more boats)
         collision = False
-        active_agents_list = [a for a in self.agents if not self.boat_states[a]['finished']]
+        attention_radius = self.boat_radius * 4
+        active_agents_list = [a for a in self.possible_agents]
         if len(active_agents_list) >= 2:
-            p0 = np.array([self.boat_states[active_agents_list[0]]['x'],
-                           self.boat_states[active_agents_list[0]]['y']])
-            p1 = np.array([self.boat_states[active_agents_list[1]]['x'],
-                           self.boat_states[active_agents_list[1]]['y']])
-            if np.linalg.norm(p0 - p1) < (self.boat_radius * 2):
+            p0 = np.array([self.boat_states[active_agents_list[0]]['x'], self.boat_states[active_agents_list[0]]['y']])
+            p1 = np.array([self.boat_states[active_agents_list[1]]['x'], self.boat_states[active_agents_list[1]]['y']])
+
+            distance_between_boats = np.linalg.norm (p0-p1)
+            if distance_between_boats < (self.boat_radius * 2):
                 collision = True
 
-        # Aggiornamento Vento (only if variable_wind is True)
-        if self.variable_wind and (self.step_count % self.wind_change_steps) == 0:
-            self.wind_change_range = self.np_random.uniform(-np.radians(10), np.radians(10))
-            self.wind_direction += self.wind_change_range
-            self.wind_direction = max(np.radians(0), min(np.pi, self.wind_direction))
+            elif distance_between_boats < attention_radius:
+                    proximity_penalty = (attention_radius - distance_between_boats) / attention_radius * 5.0
+                    rewards[active_agents_list[0]] -= proximity_penalty
+                    rewards[active_agents_list[1]] -= proximity_penalty
 
-        # Rewards e Stati
+        # Stochastic wind
+        if (self.step_count % self.wind_change_steps) == 0:
+              self.wind_change_range = self.np_random.uniform(-np.radians(10),np.radians(10))
+              self.wind_direction = np.clip(self.wind_direction + self.wind_change_range, 0, np.pi)
+
+
+        # Check who is inside currently for who can overtake
+        x_distances = {}
         for agent in self.agents:
+            boat_x = self.boat_states[agent]['x']
+            dist_x = abs(self.target[0] - boat_x)
+            x_distances[agent] = dist_x
+
+
+        min_dist_x = min(x_distances.values())
+
+        for agent in self.agents:
+            if x_distances[agent] == min_dist_x:
+                self.boat_states[agent]['is_inside_curr'] = True
+            else:
+                self.boat_states[agent]['is_inside_curr'] = False
+
+        # Reward calculation
+        for agent in agents_order:
             state = self.boat_states[agent]
             pos = np.array([state['x'], state['y']])
             dist_to_target = np.linalg.norm(pos - self.target)
+
+            state['is_near_target'] = dist_to_target < self.target_radius * 3
 
             if state['finished']:
                 terminations[agent] = True
                 continue
 
-            to_target_angle = np.arctan2(self.target[1] - state['y'],
-                                         self.target[0] - state['x'])
-            angle_error = np.abs(to_target_angle - state['heading'])
+            # VMG Reward
+            to_target_angle = np.arctan2(self.target[1] - state['y'], self.target[0] - state['x'])
+            angle_error = to_target_angle - state['heading']
             vmg = state['speed'] * np.cos(angle_error)
             self.stat_cumulative_vmg[agent] += vmg
-            rewards[agent] = rewards[agent] + (vmg * 0.5)
+            rewards[agent] = rewards[agent] + (vmg * 0.7)
+
+            # Time penalty
             rewards[agent] -= 0.05
 
+            # Deadzone Penalty
             apparent_wind = self.wind_direction - state['heading']
             wind_angle_rel = np.abs(np.degrees(apparent_wind)) % 360
-            if wind_angle_rel > 180:
-                wind_angle_rel = 360 - wind_angle_rel
+            if wind_angle_rel > 180: wind_angle_rel = 360 - wind_angle_rel
             if wind_angle_rel < 20:
                 rewards[agent] -= 0.5
 
+
+
+            # Overtaking
             displacement = state['speed'] * 0.514 * self.dt
             dx_me = np.cos(state['heading']) * displacement
             dy_me = np.sin(state['heading']) * displacement
 
-            opponents = [opp for opp in self.possible_agents if
-                         opp != agent and not self.boat_states[opp]['finished']]
-
             for opp in opponents:
-                displacement_opp = self.boat_states[opp]['speed'] * 0.514 * self.dt
-                dx_opp = np.cos(self.boat_states[opp]['heading']) * displacement_opp
-                dy_opp = np.sin(self.boat_states[opp]['heading']) * displacement_opp
-                det = dx_me * dy_opp - dx_opp * dy_me
+                  displacement_opp = self.boat_states[opp]['speed'] * 0.514 * self.dt
+                  dx_opp = np.cos(self.boat_states[opp]['heading']) * displacement_opp
+                  dy_opp = np.sin(self.boat_states[opp]['heading']) * displacement_opp
+                  det = dx_me * dy_opp - dx_opp * dy_me
 
-                x_opp = self.boat_states[opp]['x']
-                y_opp = self.boat_states[opp]['y']
 
-                dx_pos = x_opp - state['x']
-                dy_pos = y_opp - state['y']
+                  x_opp = self.boat_states[opp]['x']
+                  y_opp = self.boat_states[opp]['y']
 
-                opp_pos = np.array([x_opp, y_opp])
-                opp_dist_to_target = np.linalg.norm(opp_pos - self.target)
 
-                if det != 0:
-                    t = (dx_pos * dy_opp - dy_pos * dx_opp) / det
-                    u = (dx_pos * dy_me - dy_pos * dx_me) / det
+                  dx_pos = x_opp - state['x']
+                  dy_pos = y_opp - state['y']
+
+                  opp_pos = np.array([x_opp,y_opp])
+                  opp_dist_to_target = np.linalg.norm(opp_pos - self.target)
+
+                  if det != 0:
+
+                    # Number of steps where they intersecate in the projection
+                    t = (dx_pos * dy_opp - dy_pos * dx_opp ) / det
+                    u = (dx_pos * dy_me - dy_pos * dx_me ) / det
 
                     if 0 <= t <= 10 and 0 <= u <= 10:
-                        if not state['is_inside']:
-                            rewards[agent] -= 3
-                        else:
-                            rewards[agent] -= 0.05
+                      # Penalize boats that are not inside currently if they try to overtake
+                      if not state['is_inside_curr'] and not state['is_near_target']:
+                          rewards[agent] -= 3
+                      else:
+                          rewards[agent] -= 0.05
 
+            # Penalty for collision
             if collision:
                 rewards[agent] -= 200.0
                 state['finished'] = True
                 terminations[agent] = True
 
+            # Target Reached
             if dist_to_target < self.target_radius:
-                rewards[agent] += 50.0
+              if self.winner == None:
+                # Reward for the first boat
+                rewards[agent] += 100.0
                 state['finished'] = True
                 terminations[agent] = True
                 self.winner = agent
+              elif agent != self.winner:
+                # Reward for the other boats that reach the target (to learn path and dont surrend during training)
+                rewards[agent] += 50.0
+                state['finished'] = True
+                terminations[agent] = True
 
-                for opp in self.possible_agents:
+                # Scaled penalty for the boats that dont reach first (to keep competitiveness)
+                for opp in self.agents:
                     if opp != agent:
-                        rewards[opp] -= 50.0
-                        terminations[opp] = True
-                        if opp in self.boat_states:
-                            self.boat_states[opp]['finished'] = True
+                        opp_pos = np.array([self.boat_states[opp]['x'], self.boat_states[opp]['y']])
+                        opp_dist_to_target = np.linalg.norm(opp_pos - self.target)
 
+                        max_penalty = 30.0
+                        min_penalty = 5.0
+                        distance_ratio = np.clip(opp_dist_to_target /(self.target_radius * 10), 0.0, 1.0)
+                        scaled_penalty = min_penalty + (max_penalty - min_penalty) * distance_ratio
+                        rewards[opp] -= scaled_penalty
+
+
+            # Reward to boats that didn't win if the beat their best distance (closer to target)
             if dist_to_target < self.best_distances[agent]:
-                self.best_distances[agent] = dist_to_target
+              if state['finished'] and agent != self.winner:
+                  progress = self.best_distances[agent] - dist_to_target
+                  rewards[agent] += progress * 0.5
+              self.best_distances[agent] = dist_to_target
 
+            # Out of bounds
             if not (0 <= state['x'] <= self.field_size and 0 <= state['y'] <= self.field_size):
                 rewards[agent] -= 200.0
                 state['finished'] = True
                 terminations[agent] = True
 
+            # Max steps
             if self.step_count >= self.max_steps:
                 truncations[agent] = True
 
-        # Statistiche finali
+
+        # Statistic calculations
         for a in self.possible_agents:
+            # Base info
             infos[a]['is_winner'] = (self.winner == a)
-            infos[a]['max_speed'] = float(
-                self.boat_states[a]['max_speed_hit']) if a in self.boat_states else 0.0
+            infos[a]['max_speed'] = float(self.boat_states[a]['max_speed_hit']) if a in self.boat_states else 0.0
 
             steps = max(1, self.step_count)
+
+            # 1. Avg VMG
+            # Note: stat_cumulative_vmg is accumulated at every step
             infos[a]['avg_vmg'] = float(self.stat_cumulative_vmg[a] / steps)
 
+            # 2. Polar Efficiency (Real Speed / Theoretical Polar Speed)
             avg_theo = self.stat_cumulative_polar[a] / steps
+            # Avg real speed = total distance traveled / total time
             avg_real_speed_knots = (self.stat_total_dist[a] / (steps * self.dt)) / 0.514
 
             if avg_theo > 0.001:
+                # If stat_cumulative_polar summed knots, use knots over knots
                 infos[a]['polar_efficiency'] = float(avg_real_speed_knots / avg_theo)
             else:
                 infos[a]['polar_efficiency'] = 0.0
 
+            # 3. Path Efficiency (Linear Distance / Actual Traveled Distance)
+            # 1.0 = perfect straight line path (impossible upwind), < 1.0 = zigzag
             dist_traveled = self.stat_total_dist[a]
-            if dist_traveled > 1.0:
+            if dist_traveled > 1.0: # Avoid division by minimal distances
                 infos[a]['path_efficiency'] = float(self.stat_initial_dist[a] / dist_traveled)
             else:
                 infos[a]['path_efficiency'] = 0.0
 
+        # Console output at race end
+        # Filter active agents for rendering or internal logic
         self.agents = [a for a in self.agents if not (terminations[a] or truncations[a])]
 
         observations = {a: self._get_single_obs(a) for a in self.possible_agents}
@@ -384,6 +477,9 @@ class MultiAgentSailingZoo(ParallelEnv):
         ], dtype=np.float32)
         return obs
 
+    def _normalize_angle(self, angle):
+        return (angle + np.pi) % (2 * np.pi) - np.pi
+
     def render(self):
         if self.render_mode == 'rgb_array' or self.render_mode == 'human':
             return self._render_frame()
@@ -398,7 +494,7 @@ class MultiAgentSailingZoo(ParallelEnv):
         self.ax.set_aspect('equal')
         self.ax.grid(True, alpha=0.3)
 
-        # Vento
+        # Wind drawing
         wind_arrow_center_x = 40
         wind_arrow_center_y = self.field_size - 40
         arrow_length = 30
@@ -417,56 +513,73 @@ class MultiAgentSailingZoo(ParallelEnv):
                                        color='red', alpha=0.3, label='Target')
         self.ax.add_patch(target_circle)
 
-        # Wind Shadow cones
-        for agent_id, state in self.boat_states.items():
-            if state['finished']:
-                continue
 
+        # Shadow cones to see where they "hit"
+        for agent_id, state in self.boat_states.items():
+            if state['finished']: continue
+
+            # Calculate cone vertex (boat center)
             start_point = np.array([state['x'], state['y']])
+
+            # Calculate wind direction (WHERE wind goes)
             wind_vec_x = -np.cos(self.wind_direction)
             wind_vec_y = -np.sin(self.wind_direction)
-            shadow_length = self.boat_radius * 10
-            cone_width_angle = np.radians(20)
+
+            shadow_length = self.boat_radius * 10  # Shadow length
+            cone_width_angle = np.radians(20)      # Angle used in step() logic
+
+            # Calculate the two sides of the shadow triangle
             angle_wind = np.arctan2(wind_vec_y, wind_vec_x)
 
             x1 = state['x'] + shadow_length * np.cos(angle_wind - cone_width_angle)
             y1 = state['y'] + shadow_length * np.sin(angle_wind - cone_width_angle)
+
             x2 = state['x'] + shadow_length * np.cos(angle_wind + cone_width_angle)
             y2 = state['y'] + shadow_length * np.sin(angle_wind + cone_width_angle)
 
+            # Draw polygon
             shadow_poly = patches.Polygon([start_point, [x1, y1], [x2, y2]],
                                           closed=True, color='gray', alpha=0.2)
             self.ax.add_patch(shadow_poly)
 
-        # Proiezioni future
-        future_steps = 30
+        future_steps = 30  # How many steps ahead to visualize
+
         for agent in self.agents:
-            if self.boat_states[agent]['finished']:
-                continue
+            if self.boat_states[agent]['finished']: continue
+
             s = self.boat_states[agent]
+
+            # Calculate displacement vector for single step (consistent with step())
             step_dist = s['speed'] * 0.514 * self.dt
             ddx = np.cos(s['heading']) * step_dist
             ddy = np.sin(s['heading']) * step_dist
+
+            # Calculate projection end point
             end_x = s['x'] + ddx * future_steps
             end_y = s['y'] + ddy * future_steps
+
+            # dashed line (The Projection)
             self.ax.plot([s['x'], end_x], [s['y'], end_y],
                          linestyle='--', color='gray', alpha=0.5, linewidth=1)
 
-        # Agenti
-        colors = ['green', 'orange', 'purple', 'blue']
+        # --- Agents Rendering ---
+        colors = ['green', 'orange', 'purple', 'blue'] # Colors for different agents
+
+
         for i, (agent_id, state) in enumerate(self.boat_states.items()):
             color = colors[i % len(colors)]
 
+            # Trajectory
             if agent_id in self.trajectories and len(self.trajectories[agent_id]) > 1:
                 traj = np.array(self.trajectories[agent_id])
-                self.ax.plot(traj[:, 0], traj[:, 1], color=color, linestyle='-', alpha=0.5,
-                             linewidth=1)
+                self.ax.plot(traj[:, 0], traj[:, 1], color=color, linestyle='-', alpha=0.5, linewidth=1)
 
+            # Boat Polygon
             boat_size = 15
             boat_points = np.array([
                 [boat_size, 0],
-                [-boat_size / 2, boat_size / 2],
-                [-boat_size / 2, -boat_size / 2]
+                [-boat_size/2, boat_size/2],
+                [-boat_size/2, -boat_size/2]
             ])
 
             rotation_matrix = np.array([
@@ -479,16 +592,21 @@ class MultiAgentSailingZoo(ParallelEnv):
             boat = patches.Polygon(final_points, closed=True, color=color,
                                    edgecolor='black', linewidth=1, label=agent_id)
             self.ax.add_patch(boat)
-            self.ax.text(state['x'], state['y'] + 10, agent_id, fontsize=8, color=color,
-                         weight='bold', ha='center')
 
-        wind_label = "Variable" if self.variable_wind else "Fixed"
-        plt.suptitle(f"STEP: {self.step_count} | Wind: {wind_label}", y=0.96, fontsize=12,
-                     weight='bold')
+            # ID label near the boat
+            self.ax.text(state['x'], state['y'] + 10, agent_id, fontsize=8, color=color, weight='bold', ha='center')
+
+        # Title and Legend
+        plt.suptitle(f"STEP: {self.step_count}", y=0.96, fontsize=12, weight='bold')
         self.ax.legend(loc='lower right', fontsize=8)
 
+        # Output for rgb_array
         self.fig.canvas.draw()
         image = np.asarray(self.fig.canvas.buffer_rgba())[:, :, :3]
+
+        if self.render_mode == "human":
+            plt.show(block=False)
+            plt.pause(0.001)
 
         plt.close(self.fig)
         self.fig = None
@@ -497,4 +615,3 @@ class MultiAgentSailingZoo(ParallelEnv):
     def close(self):
         if self.fig is not None:
             plt.close(self.fig)
-            self.fig = None

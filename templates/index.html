@@ -394,8 +394,8 @@
             <h2>Parameters</h2>
             <div class="params-grid">
                 <div>
-                    <label for="max_steps">Max Steps to Target</label>
-                    <input type="range" id="max_steps" min="50" max="250" value="250" step="10"
+                    <label for="max_steps">Max Steps</label>
+                    <input type="range" id="max_steps" min="50" max="500" value="250" step="10"
                            oninput="document.getElementById('val_steps').textContent=this.value">
                     <div class="range-value" id="val_steps">250</div>
                 </div>
@@ -405,17 +405,9 @@
                            oninput="document.getElementById('val_field').textContent=this.value">
                     <div class="range-value" id="val_field">400</div>
                 </div>
-                <div class="toggle-wrap">
-                    <label>Variable Wind</label>
-                    <label class="toggle">
-                        <input type="checkbox" id="variable_wind" checked>
-                        <span class="slider"></span>
-                    </label>
-                    <span class="toggle-label" id="wind_label">ON</span>
-                </div>
             </div>
             <div class="timesteps-row">
-                <label for="total_timesteps">Training Timesteps</label>
+                <label for="total_timesteps">Training Timesteps (1,000,000 recommended)</label>
                 <input type="range" id="total_timesteps" min="100000" max="2000000" value="500000" step="100000"
                        oninput="document.getElementById('val_ts').textContent=Number(this.value).toLocaleString()">
                 <div class="range-value" id="val_ts">500,000</div>
@@ -489,12 +481,6 @@
     </div>
 
 <script>
-    // Toggle label
-    const windCb = document.getElementById('variable_wind');
-    windCb.addEventListener('change', () => {
-        document.getElementById('wind_label').textContent = windCb.checked ? 'ON' : 'OFF';
-    });
-
     function setStatus(msg, type) {
         const el = document.getElementById('status-msg');
         el.textContent = msg;
@@ -512,9 +498,8 @@
         document.getElementById('results').classList.remove('active');
 
         const body = {
-            max_steps: +document.getElementById('max_steps').value,
             field_size: +document.getElementById('field_size').value,
-            variable_wind: document.getElementById('variable_wind').checked,
+            max_steps: +document.getElementById('max_steps').value,
             total_timesteps: +document.getElementById('total_timesteps').value,
         };
 
