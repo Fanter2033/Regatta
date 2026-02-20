@@ -6,7 +6,6 @@ import matplotlib.pyplot as plt
 import matplotlib.patches as patches
 from pettingzoo import ParallelEnv
 
-
 class MultiAgentSailingZoo(ParallelEnv):
     metadata = {"render_modes": ["rgb_array", "human"], "name": "sailing_v1"}
 
