@@ -1,0 +1,11 @@
+flask
+numpy
+gymnasium
+pettingzoo
+stable-baselines3
+supersuit
+imageio
+imageio-ffmpeg
+matplotlib
+torch
+pyyaml

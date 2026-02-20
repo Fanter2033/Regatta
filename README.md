@@ -99,15 +99,17 @@ Discrete(3):
 ### Prerequisites
 
 - Python 3.9+
+- Conda env
 
 ### Install Dependencies
 
 ```bash
-pip install flask numpy gymnasium pettingzoo stable-baselines3 supersuit imageio imageio-ffmpeg matplotlib torch
+conda create -n <env_name> python=3.13
+conda activate <env_name>
+pip install -r requirements.txt
 ```
 
 ---
-
 ## Usage
 
 ### Web Interface
