@@ -12,17 +12,6 @@ By implementing the **Proximal Policy Optimization (PPO)** algorithm within a [G
 
 ---
 
-## Features
-
-- **Multi-agent parallel environment** built on the PettingZoo `ParallelEnv` API
-- **Realistic sailing physics** — polar speed diagram, wind shadow cones, stochastic wind shifts
-- **PPO training** via Stable-Baselines3 with SuperSuit vectorized wrappers
-- **Web dashboard** (Flask) for configuring, training, simulating, and batch-testing — all from the browser
-- **Video replay** — every simulation is rendered to MP4 with trajectories, wind arrows, and shadow cones
-- **Batch evaluation** with detailed statistics: win rates, VMG, positional analysis, triple-turn counts, and more
-
----
-
 ## Project Structure
 
 ```
